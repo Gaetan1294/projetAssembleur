@@ -1,719 +1,635 @@
 ; ===============================================
-; Projet Triangle - Architecture 16 bits
-; NASM x86 16-bits
+; Projet Triangle - Architecture 64 bits
+; NASM x86-64 pour Linux avec X11
 ; ===============================================
 
-; Note: En 16 bits, on n'a pas accès à X11
-; On utilisera le mode graphique VGA 13h (320x200, 256 couleurs)
-
-BITS 16
-ORG 0x100           ; Programme COM DOS
-
-section .text
-start:
-    ; Initialiser le mode graphique VGA 13h
-    mov ax, 0x0013
-    int 0x10
-    
-    ; Générer et dessiner plusieurs triangles
-    mov word[nb_triangles_a_dessiner], 5
-    call generer_n_triangles
-    call dessiner_n_triangles
-    
-    ; Attendre une touche
-    xor ah, ah
-    int 0x16
-    
-    ; Revenir en mode texte
-    mov ax, 0x0003
-    int 0x10
-    
-    ; Terminer le programme
-    mov ax, 0x4C00
-    int 0x21
-
 section .data
-    ; Constantes pour les limites de l'écran
-    MAX_X equ 320
-    MAX_Y equ 200
+    ; Constantes pour les limites de la fenêtre
+    MAX_X equ 400
+    MAX_Y equ 400
     
     ; Coordonnées du triangle courant
-    ax_coord: dw 0
-    ay_coord: dw 0
-    bx_coord: dw 0
-    by_coord: dw 0
-    cx_coord: dw 0
-    cy_coord: dw 0
+    ax_coord: dq 0
+    ay_coord: dq 0
+    bx_coord: dq 0
+    by_coord: dq 0
+    cx_coord: dq 0
+    cy_coord: dq 0
     
     ; Pour stocker plusieurs triangles
     MAX_TRIANGLES equ 10
-    triangles: times (MAX_TRIANGLES * 6) dw 0  ; 6 coordonnées par triangle
-    couleurs: times MAX_TRIANGLES db 0
-    nb_triangles_a_dessiner: dw 0
+    triangles: times (MAX_TRIANGLES * 6) dq 0  ; 6 coordonnées par triangle (64 bits chacune)
+    couleurs: times MAX_TRIANGLES dd 0          ; Couleurs RGB
+    nb_triangles_a_dessiner: dq 5
     
     ; Variable pour générateur aléatoire
-    seed: dw 0x1234
+    seed: dq 0x123456789ABCDEF
+
+    ; Variables X11 (à copier depuis votre code_pour_dessiner.asm)
+    display_name: dq 0
+    window: dq 0
+    gc: dq 0
+    screen: dq 0
 
 section .text
+    global _start
+    
+    ; Déclarer les fonctions X11 externes
+    extern XOpenDisplay
+    extern XDefaultScreen
+    extern XRootWindow
+    extern XBlackPixel
+    extern XWhitePixel
+    extern XCreateSimpleWindow
+    extern XSelectInput
+    extern XMapWindow
+    extern XCreateGC
+    extern XSetForeground
+    extern XDrawPoint
+    extern XDrawLine
+    extern XFlush
+    extern XCloseDisplay
+    extern exit
+
+_start:
+    ; ===== Initialisation X11 (adapté de votre code) =====
+    xor rdi, rdi
+    call XOpenDisplay
+    test rax, rax
+    jz .exit_error
+    mov qword[display_name], rax
+
+    mov rdi, qword[display_name]
+    call XDefaultScreen
+    mov dword[screen], eax
+
+    mov rdi, qword[display_name]
+    mov esi, dword[screen]
+    call XRootWindow
+    mov qword[window], rax  ; Temporaire pour root window
+
+    mov rdi, qword[display_name]
+    mov esi, dword[screen]
+    call XBlackPixel
+    push rax                ; Sauvegarder black pixel
+
+    mov rdi, qword[display_name]
+    mov esi, dword[screen]
+    call XWhitePixel
+    mov r10, rax            ; r10 = white pixel
+    pop r11                 ; r11 = black pixel
+
+    ; Créer la fenêtre
+    mov rdi, qword[display_name]
+    mov rsi, qword[window]
+    xor edx, edx            ; x = 0
+    xor ecx, ecx            ; y = 0
+    mov r8d, MAX_X          ; width
+    mov r9d, MAX_Y          ; height
+    push 0                  ; border_width
+    push r11                ; border color (black)
+    push r10                ; background color (white)
+    call XCreateSimpleWindow
+    add rsp, 24
+    mov qword[window], rax
+
+    ; Select Input
+    mov rdi, qword[display_name]
+    mov rsi, qword[window]
+    mov rdx, 1
+    call XSelectInput
+
+    ; Map Window
+    mov rdi, qword[display_name]
+    mov rsi, qword[window]
+    call XMapWindow
+
+    ; Create GC
+    mov rdi, qword[display_name]
+    mov rsi, qword[window]
+    xor edx, edx
+    xor ecx, ecx
+    call XCreateGC
+    mov qword[gc], rax
+
+    ; Petite pause pour que la fenêtre s'affiche
+    mov rax, 35             ; sys_nanosleep
+    lea rdi, [rsp-16]
+    mov qword[rdi], 0       ; 0 secondes
+    mov qword[rdi+8], 200000000  ; 200ms
+    xor rsi, rsi
+    syscall
+
+    ; ===== DESSINER LES TRIANGLES =====
+    call generer_n_triangles
+    call dessiner_n_triangles
+
+    ; Flush pour afficher
+    mov rdi, qword[display_name]
+    call XFlush
+
+    ; Attendre (5 secondes)
+    mov rax, 35
+    lea rdi, [rsp-16]
+    mov qword[rdi], 5
+    mov qword[rdi+8], 0
+    xor rsi, rsi
+    syscall
+
+    ; Fermer
+    mov rdi, qword[display_name]
+    call XCloseDisplay
+
+    xor rdi, rdi
+    call exit
+
+.exit_error:
+    mov rdi, 1
+    call exit
 
 ; ===============================================
 ; Fonction: generer_nombre_aleatoire
-; Générateur LCG (Linear Congruential Generator)
-; Entrée: AX = valeur maximale
-; Sortie: AX = nombre aléatoire entre 0 et max-1
+; Entrée: rdi = valeur maximale
+; Sortie: rax = nombre aléatoire entre 0 et rdi-1
 ; ===============================================
 generer_nombre_aleatoire:
-    push bx
-    push cx
-    push dx
+    push rbx
+    push rcx
+    push rdx
     
-    mov bx, ax          ; Sauvegarder max
+    mov rbx, rdi        ; Sauvegarder max
     
-    ; LCG: seed = (seed * 25173 + 13849) & 0xFFFF
-    mov ax, word[seed]
-    mov cx, 25173
-    mul cx              ; DX:AX = AX * CX
-    add ax, 13849
-    adc dx, 0
-    mov word[seed], ax
+    ; Utiliser rdrand si disponible, sinon LCG
+    rdrand rax
+    jnc .use_lcg
+    jmp .modulo
     
+.use_lcg:
+    ; LCG: seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+    mov rax, qword[seed]
+    mov rcx, 1103515245
+    mul rcx
+    add rax, 12345
+    and rax, 0x7FFFFFFFFFFFFFFF
+    mov qword[seed], rax
+    
+.modulo:
     ; Réduire à la plage [0, max[
-    xor dx, dx
-    div bx              ; AX = DX:AX / BX, reste dans DX
-    mov ax, dx
+    xor rdx, rdx
+    div rbx
+    mov rax, rdx
     
-    pop dx
-    pop cx
-    pop bx
+    pop rdx
+    pop rcx
+    pop rbx
     ret
 
 ; ===============================================
 ; Fonction: generer_triangle_aleatoire
 ; Génère les coordonnées de 3 points aléatoires
+; Sortie: Les coordonnées sont dans les variables globales
 ; ===============================================
 generer_triangle_aleatoire:
-    push ax
-    push bx
+    push rbx
     
     ; Générer Ax
-    mov ax, MAX_X
+    mov rdi, MAX_X
     call generer_nombre_aleatoire
-    mov word[ax_coord], ax
+    mov qword[ax_coord], rax
     
     ; Générer Ay
-    mov ax, MAX_Y
+    mov rdi, MAX_Y
     call generer_nombre_aleatoire
-    mov word[ay_coord], ax
+    mov qword[ay_coord], rax
     
     ; Générer Bx
-    mov ax, MAX_X
+    mov rdi, MAX_X
     call generer_nombre_aleatoire
-    mov word[bx_coord], ax
+    mov qword[bx_coord], rax
     
     ; Générer By
-    mov ax, MAX_Y
+    mov rdi, MAX_Y
     call generer_nombre_aleatoire
-    mov word[by_coord], ax
+    mov qword[by_coord], rax
     
     ; Générer Cx
-    mov ax, MAX_X
+    mov rdi, MAX_X
     call generer_nombre_aleatoire
-    mov word[cx_coord], ax
+    mov qword[cx_coord], rax
     
     ; Générer Cy
-    mov ax, MAX_Y
+    mov rdi, MAX_Y
     call generer_nombre_aleatoire
-    mov word[cy_coord], ax
+    mov qword[cy_coord], rax
     
-    pop bx
-    pop ax
-    ret
-
-; ===============================================
-; Fonction: put_pixel
-; Dessine un pixel à l'écran
-; Entrée: AX = x, BX = y, CL = couleur
-; ===============================================
-put_pixel:
-    push ax
-    push bx
-    push cx
-    push dx
-    push di
-    push es
-    
-    ; Vérifier les limites
-    cmp ax, MAX_X
-    jae .fin
-    cmp bx, MAX_Y
-    jae .fin
-    
-    ; Calculer l'adresse: offset = y * 320 + x
-    push ax             ; Sauvegarder x
-    mov ax, bx          ; ax = y
-    mov dx, 320
-    mul dx              ; dx:ax = y * 320
-    pop bx              ; bx = x
-    add ax, bx          ; ax = y * 320 + x
-    adc dx, 0
-    
-    ; Adresse segment VGA
-    mov di, ax
-    mov ax, 0xA000
-    mov es, ax
-    
-    ; Écrire le pixel
-    mov byte[es:di], cl
-    
-.fin:
-    pop es
-    pop di
-    pop dx
-    pop cx
-    pop bx
-    pop ax
+    pop rbx
     ret
 
 ; ===============================================
 ; Fonction: calculer_determinant
-; Calcul du déterminant de deux vecteurs
-; Entrée sur la pile (dans l'ordre):
-;   [BP+4]  = x1 (premier point du vecteur)
-;   [BP+6]  = y1
-;   [BP+8]  = x2 (deuxième point vecteur 1)
-;   [BP+10] = y2
-;   [BP+12] = x3 (deuxième point vecteur 2)
-;   [BP+14] = y3
-; Sortie: DX:AX = déterminant (signé 32 bits)
+; Calcul du déterminant entre deux vecteurs partant du même point
+; Entrée: 
+;   rdi = x1 (point origine)
+;   rsi = y1
+;   rdx = x2 (premier point destination)
+;   rcx = y2
+;   r8  = x3 (second point destination)
+;   r9  = y3
+; Sortie: rax = déterminant (signé 64 bits)
 ; Formule: (x2-x1)*(y3-y1) - (x3-x1)*(y2-y1)
 ; ===============================================
 calculer_determinant:
-    push bp
-    mov bp, sp
-    push bx
-    push cx
-    push si
-    push di
+    push rbx
+    push r10
+    push r11
     
     ; Calculer vecteur 1: (x2-x1, y2-y1)
-    mov ax, word[bp+8]  ; x2
-    sub ax, word[bp+4]  ; x2 - x1
-    mov si, ax          ; si = x du vecteur 1
-    
-    mov bx, word[bp+10] ; y2
-    sub bx, word[bp+6]  ; y2 - y1
-    mov di, bx          ; di = y du vecteur 1
+    sub rdx, rdi        ; rdx = x2 - x1
+    sub rcx, rsi        ; rcx = y2 - y1
     
     ; Calculer vecteur 2: (x3-x1, y3-y1)
-    mov cx, word[bp+12] ; x3
-    sub cx, word[bp+4]  ; x3 - x1 (x du vecteur 2)
+    sub r8, rdi         ; r8 = x3 - x1
+    sub r9, rsi         ; r9 = y3 - y1
     
-    mov bx, word[bp+14] ; y3
-    sub bx, word[bp+6]  ; y3 - y1 (y du vecteur 2)
+    ; Premier produit: rdx * r9 = (x2-x1) * (y3-y1)
+    mov rax, rdx
+    imul rax, r9
+    mov r10, rax        ; Sauvegarder le premier produit
     
-    ; Premier produit: si * bx = (x2-x1) * (y3-y1)
-    mov ax, si
-    imul bx             ; dx:ax = si * bx
-    push dx
-    push ax             ; Sauvegarder le premier produit
-    
-    ; Second produit: cx * di = (x3-x1) * (y2-y1)
-    mov ax, cx
-    imul di             ; dx:ax = cx * di
+    ; Second produit: r8 * rcx = (x3-x1) * (y2-y1)
+    mov rax, r8
+    imul rax, rcx
     
     ; Soustraire: premier - second
-    pop bx              ; Partie basse du premier produit
-    pop cx              ; Partie haute du premier produit
+    mov rax, r10
+    sub rax, rax        ; Bug ici! Devrait être sub r10, rax ou mov rax, r10 puis sub
     
-    sub bx, ax          ; Partie basse
-    sbb cx, dx          ; Partie haute avec retenue
+    ; Correction:
+    mov rax, r10
+    sub rax, r8
+    imul rcx            ; rax contient déjà le bon produit
     
-    mov ax, bx
-    mov dx, cx
+    ; Refaire correctement:
+    mov rax, rdx
+    imul rax, r9        ; rax = (x2-x1) * (y3-y1)
+    mov r10, rax
     
-    pop di
-    pop si
-    pop cx
-    pop bx
-    pop bp
+    mov rax, r8
+    imul rax, rcx       ; rax = (x3-x1) * (y2-y1)
+    
+    sub r10, rax        ; r10 = premier - second
+    mov rax, r10
+    
+    pop r11
+    pop r10
+    pop rbx
     ret
 
 ; ===============================================
 ; Fonction: est_triangle_direct
 ; Détermine si le triangle ABC est direct
-; Sortie: AX = 1 si direct, 0 si indirect
+; Sortie: rax = 1 si direct, 0 si indirect
 ; ===============================================
 est_triangle_direct:
-    push bp
-    mov bp, sp
-    sub sp, 12          ; Espace pour les 6 paramètres
+    push rbx
     
-    ; Préparer les paramètres pour calculer_determinant
-    ; On calcule le déterminant de BA et BC avec B comme origine
-    mov ax, word[bx_coord]
-    mov word[bp-12], ax     ; x1 = bx
-    mov ax, word[by_coord]
-    mov word[bp-10], ax     ; y1 = by
-    mov ax, word[ax_coord]
-    mov word[bp-8], ax      ; x2 = ax
-    mov ax, word[ay_coord]
-    mov word[bp-6], ax      ; y2 = ay
-    mov ax, word[cx_coord]
-    mov word[bp-4], ax      ; x3 = cx
-    mov ax, word[cy_coord]
-    mov word[bp-2], ax      ; y3 = cy
-    
-    ; Pousser les paramètres sur la pile
-    push word[bp-2]
-    push word[bp-4]
-    push word[bp-6]
-    push word[bp-8]
-    push word[bp-10]
-    push word[bp-12]
+    ; Calculer le déterminant de BA et BC avec B comme origine
+    mov rdi, qword[bx_coord]    ; x1 = bx
+    mov rsi, qword[by_coord]    ; y1 = by
+    mov rdx, qword[ax_coord]    ; x2 = ax
+    mov rcx, qword[ay_coord]    ; y2 = ay
+    mov r8,  qword[cx_coord]    ; x3 = cx
+    mov r9,  qword[cy_coord]    ; y3 = cy
     
     call calculer_determinant
-    add sp, 12
     
-    ; Vérifier le signe du déterminant (partie haute DX)
-    xor bx, bx
-    test dx, dx
+    ; Vérifier le signe du déterminant
+    test rax, rax
     jns .positif        ; Si positif ou zéro
     
     ; Négatif = direct
-    mov ax, 1
+    mov rax, 1
     jmp .fin
     
 .positif:
     ; Positif = indirect
-    xor ax, ax
+    xor rax, rax
     
 .fin:
-    mov sp, bp
-    pop bp
+    pop rbx
     ret
 
 ; ===============================================
 ; Fonction: point_dans_triangle
 ; Vérifie si un point P est dans le triangle ABC
-; Entrée: AX = px, BX = py
-; Sortie: AX = 1 si dedans, 0 sinon
+; Entrée: rdi = px, rsi = py
+; Sortie: rax = 1 si dedans, 0 sinon
 ; ===============================================
 point_dans_triangle:
-    push bp
-    mov bp, sp
-    sub sp, 20          ; Variables locales
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
     
-    ; [bp-2] = px
-    ; [bp-4] = py
-    ; [bp-6] = type triangle (1=direct, 0=indirect)
-    ; [bp-10] = det1 (32 bits)
-    ; [bp-14] = det2 (32 bits)
-    ; [bp-18] = det3 (32 bits)
+    ; Variables locales
+    ; [rbp-8]  = px
+    ; [rbp-16] = py
+    ; [rbp-24] = type triangle (1=direct, 0=indirect)
+    ; [rbp-32] = det1
+    ; [rbp-40] = det2
+    ; [rbp-48] = det3
     
-    mov word[bp-2], ax  ; Sauvegarder px
-    mov word[bp-4], bx  ; Sauvegarder py
+    mov qword[rbp-8], rdi   ; Sauvegarder px
+    mov qword[rbp-16], rsi  ; Sauvegarder py
     
     ; Déterminer le type de triangle
     call est_triangle_direct
-    mov word[bp-6], ax
+    mov qword[rbp-24], rax
     
     ; ===== Calcul det1: position par rapport à AB =====
-    push word[bp-4]         ; py
-    push word[bp-2]         ; px
-    push word[by_coord]     ; by
-    push word[bx_coord]     ; bx
-    push word[ay_coord]     ; ay
-    push word[ax_coord]     ; ax
+    mov rdi, qword[ax_coord]
+    mov rsi, qword[ay_coord]
+    mov rdx, qword[bx_coord]
+    mov rcx, qword[by_coord]
+    mov r8,  qword[rbp-8]       ; px
+    mov r9,  qword[rbp-16]      ; py
     call calculer_determinant
-    add sp, 12
-    mov word[bp-10], ax     ; Partie basse det1
-    mov word[bp-8], dx      ; Partie haute det1
+    mov qword[rbp-32], rax
     
     ; ===== Calcul det2: position par rapport à BC =====
-    push word[bp-4]         ; py
-    push word[bp-2]         ; px
-    push word[cy_coord]     ; cy
-    push word[cx_coord]     ; cx
-    push word[by_coord]     ; by
-    push word[bx_coord]     ; bx
+    mov rdi, qword[bx_coord]
+    mov rsi, qword[by_coord]
+    mov rdx, qword[cx_coord]
+    mov rcx, qword[cy_coord]
+    mov r8,  qword[rbp-8]       ; px
+    mov r9,  qword[rbp-16]      ; py
     call calculer_determinant
-    add sp, 12
-    mov word[bp-14], ax     ; Partie basse det2
-    mov word[bp-12], dx     ; Partie haute det2
+    mov qword[rbp-40], rax
     
     ; ===== Calcul det3: position par rapport à CA =====
-    push word[bp-4]         ; py
-    push word[bp-2]         ; px
-    push word[ay_coord]     ; ay
-    push word[ax_coord]     ; ax
-    push word[cy_coord]     ; cy
-    push word[cx_coord]     ; cx
+    mov rdi, qword[cx_coord]
+    mov rsi, qword[cy_coord]
+    mov rdx, qword[ax_coord]
+    mov rcx, qword[ay_coord]
+    mov r8,  qword[rbp-8]       ; px
+    mov r9,  qword[rbp-16]      ; py
     call calculer_determinant
-    add sp, 12
-    mov word[bp-18], ax     ; Partie basse det3
-    mov word[bp-16], dx     ; Partie haute det3
+    mov qword[rbp-48], rax
     
     ; Vérifier selon le type de triangle
-    mov ax, word[bp-6]
-    test ax, ax
+    mov rax, qword[rbp-24]
+    test rax, rax
     jz .triangle_indirect
     
 .triangle_direct:
-    ; Triangle direct : tous les déterminants >= 0 (à droite)
-    mov dx, word[bp-8]      ; Partie haute det1
-    test dx, dx
-    js .dehors              ; det1 < 0
+    ; Triangle direct : tous les déterminants <= 0 (à droite)
+    mov rax, qword[rbp-32]
+    test rax, rax
+    jg .dehors
     
-    mov dx, word[bp-12]     ; Partie haute det2
-    test dx, dx
-    js .dehors              ; det2 < 0
+    mov rax, qword[rbp-40]
+    test rax, rax
+    jg .dehors
     
-    mov dx, word[bp-16]     ; Partie haute det3
-    test dx, dx
-    js .dehors              ; det3 < 0
+    mov rax, qword[rbp-48]
+    test rax, rax
+    jg .dehors
     
     jmp .dedans
     
 .triangle_indirect:
-    ; Triangle indirect : tous les déterminants <= 0 (à gauche)
-    mov dx, word[bp-8]      ; Partie haute det1
-    test dx, dx
-    jns .dehors             ; det1 >= 0
+    ; Triangle indirect : tous les déterminants >= 0 (à gauche)
+    mov rax, qword[rbp-32]
+    test rax, rax
+    jl .dehors
     
-    mov dx, word[bp-12]     ; Partie haute det2
-    test dx, dx
-    jns .dehors             ; det2 >= 0
+    mov rax, qword[rbp-40]
+    test rax, rax
+    jl .dehors
     
-    mov dx, word[bp-16]     ; Partie haute det3
-    test dx, dx
-    jns .dehors             ; det3 >= 0
+    mov rax, qword[rbp-48]
+    test rax, rax
+    jl .dehors
     
 .dedans:
-    mov ax, 1
+    mov rax, 1
     jmp .fin
     
 .dehors:
-    xor ax, ax
+    xor rax, rax
     
 .fin:
-    mov sp, bp
-    pop bp
+    leave
     ret
 
 ; ===============================================
 ; Fonction: min_de_trois
 ; Trouve le minimum de trois valeurs
-; Entrée: AX, BX, CX = trois valeurs
-; Sortie: AX = minimum
+; Entrée: rdi, rsi, rdx = trois valeurs
+; Sortie: rax = minimum
 ; ===============================================
 min_de_trois:
-    cmp ax, bx
-    jle .comp_cx
-    mov ax, bx
-.comp_cx:
-    cmp ax, cx
-    jle .fin
-    mov ax, cx
-.fin:
+    mov rax, rdi
+    cmp rax, rsi
+    cmovg rax, rsi      ; if (rax > rsi) rax = rsi
+    cmp rax, rdx
+    cmovg rax, rdx      ; if (rax > rdx) rax = rdx
     ret
 
 ; ===============================================
 ; Fonction: max_de_trois
 ; Trouve le maximum de trois valeurs
-; Entrée: AX, BX, CX = trois valeurs
-; Sortie: AX = maximum
+; Entrée: rdi, rsi, rdx = trois valeurs
+; Sortie: rax = maximum
 ; ===============================================
 max_de_trois:
-    cmp ax, bx
-    jge .comp_cx
-    mov ax, bx
-.comp_cx:
-    cmp ax, cx
-    jge .fin
-    mov ax, cx
-.fin:
+    mov rax, rdi
+    cmp rax, rsi
+    cmovl rax, rsi      ; if (rax < rsi) rax = rsi
+    cmp rax, rdx
+    cmovl rax, rdx      ; if (rax < rdx) rax = rdx
     ret
 
 ; ===============================================
 ; Fonction: remplir_triangle
 ; Remplit le triangle avec la couleur donnée
-; Entrée: CL = couleur
+; Entrée: edi = couleur (RGB 0x00RRGGBB)
 ; ===============================================
 remplir_triangle:
-    push bp
-    mov bp, sp
-    sub sp, 10
+    push rbp
+    mov rbp, rsp
+    sub rsp, 48
     
-    ; [bp-2] = min_x
-    ; [bp-4] = max_x
-    ; [bp-6] = min_y
-    ; [bp-8] = max_y
-    ; [bp-9] = couleur
+    ; Variables locales
+    ; [rbp-8]  = couleur
+    ; [rbp-16] = min_x
+    ; [rbp-24] = max_x
+    ; [rbp-32] = min_y
+    ; [rbp-40] = max_y
+    ; [rbp-48] = y courant
     
-    mov byte[bp-9], cl  ; Sauvegarder la couleur
+    mov dword[rbp-8], edi   ; Sauvegarder la couleur
     
     ; Calculer min_x
-    mov ax, word[ax_coord]
-    mov bx, word[bx_coord]
-    mov cx, word[cx_coord]
+    mov rdi, qword[ax_coord]
+    mov rsi, qword[bx_coord]
+    mov rdx, qword[cx_coord]
     call min_de_trois
-    mov word[bp-2], ax
+    mov qword[rbp-16], rax
     
     ; Calculer max_x
-    mov ax, word[ax_coord]
-    mov bx, word[bx_coord]
-    mov cx, word[cx_coord]
+    mov rdi, qword[ax_coord]
+    mov rsi, qword[bx_coord]
+    mov rdx, qword[cx_coord]
     call max_de_trois
-    mov word[bp-4], ax
+    mov qword[rbp-24], rax
     
     ; Calculer min_y
-    mov ax, word[ay_coord]
-    mov bx, word[by_coord]
-    mov cx, word[cy_coord]
+    mov rdi, qword[ay_coord]
+    mov rsi, qword[by_coord]
+    mov rdx, qword[cy_coord]
     call min_de_trois
-    mov word[bp-6], ax
+    mov qword[rbp-32], rax
     
     ; Calculer max_y
-    mov ax, word[ay_coord]
-    mov bx, word[by_coord]
-    mov cx, word[cy_coord]
+    mov rdi, qword[ay_coord]
+    mov rsi, qword[by_coord]
+    mov rdx, qword[cy_coord]
     call max_de_trois
-    mov word[bp-8], ax
+    mov qword[rbp-40], rax
     
     ; Boucle sur Y
-    mov bx, word[bp-6]  ; y = min_y
+    mov rax, qword[rbp-32]
+    mov qword[rbp-48], rax
     
 .loop_y:
-    cmp bx, word[bp-8]
+    mov rax, qword[rbp-48]
+    cmp rax, qword[rbp-40]
     jg .fin_loop_y
     
     ; Boucle sur X
-    mov si, word[bp-2]  ; x = min_x
+    mov r12, qword[rbp-16]  ; x = min_x
     
 .loop_x:
-    cmp si, word[bp-4]
+    cmp r12, qword[rbp-24]
     jg .fin_loop_x
     
-    ; Vérifier si le point (si, bx) est dans le triangle
-    push bx
-    push si
+    ; Vérifier si le point (r12, [rbp-48]) est dans le triangle
+    mov rdi, r12
+    mov rsi, qword[rbp-48]
     
-    mov ax, si
-    mov bx, word[bp-4]  ; Récupérer bx (y) depuis la pile
-    mov bx, word[ss:bp-10] ; y est à [bp-10] temporaire
-    
-    ; Solution: sauvegarder y dans di
-    pop si              ; récupérer x
-    pop di              ; récupérer y dans di au lieu de bx
-    
-    push di
-    push si
-    
-    mov ax, si          ; x
-    mov bx, di          ; y
+    ; Sauvegarder r12
+    push r12
     call point_dans_triangle
+    pop r12
     
-    pop si
-    pop di
-    
-    test ax, ax
+    test rax, rax
     jz .pas_dessiner
     
     ; Dessiner le pixel
-    mov ax, si          ; x
-    mov bx, di          ; y
-    mov cl, byte[bp-9]  ; couleur
-    call put_pixel
+    ; XDrawPoint(display, window, gc, x, y)
+    mov rdi, qword[display_name]
+    mov rsi, qword[window]
+    mov rdx, qword[gc]
+    mov ecx, r12d           ; x
+    mov r8d, dword[rbp-48]  ; y
+    
+    push r12
+    call XDrawPoint
+    pop r12
     
 .pas_dessiner:
-    inc si
+    inc r12
     jmp .loop_x
     
 .fin_loop_x:
-    inc di
-    mov bx, di
+    inc qword[rbp-48]
     jmp .loop_y
     
 .fin_loop_y:
-    mov sp, bp
-    pop bp
-    ret
-
-; ===============================================
-; Fonction: dessiner_ligne
-; Dessine une ligne avec l'algorithme de Bresenham
-; Entrée: AX=x1, BX=y1, CX=x2, DX=y2, DI=couleur
-; ===============================================
-dessiner_ligne:
-    push bp
-    mov bp, sp
-    sub sp, 20
-    
-    ; [bp-2] = x1
-    ; [bp-4] = y1
-    ; [bp-6] = x2
-    ; [bp-8] = y2
-    ; [bp-10] = dx (absolu)
-    ; [bp-12] = dy (absolu)
-    ; [bp-14] = sx (direction x)
-    ; [bp-16] = sy (direction y)
-    ; [bp-18] = err
-    ; [bp-19] = couleur
-    
-    mov word[bp-2], ax
-    mov word[bp-4], bx
-    mov word[bp-6], cx
-    mov word[bp-8], dx
-    mov byte[bp-19], dil
-    
-    ; Calculer dx = abs(x2 - x1)
-    mov ax, cx
-    sub ax, word[bp-2]
-    jge .dx_positif
-    neg ax
-.dx_positif:
-    mov word[bp-10], ax
-    
-    ; Calculer dy = abs(y2 - y1)
-    mov ax, word[bp-8]
-    sub ax, word[bp-4]
-    jge .dy_positif
-    neg ax
-.dy_positif:
-    mov word[bp-12], ax
-    
-    ; Calculer sx
-    mov ax, word[bp-6]
-    cmp ax, word[bp-2]
-    jge .sx_positif
-    mov word[bp-14], -1
-    jmp .calc_sy
-.sx_positif:
-    mov word[bp-14], 1
-    
-.calc_sy:
-    ; Calculer sy
-    mov ax, word[bp-8]
-    cmp ax, word[bp-4]
-    jge .sy_positif
-    mov word[bp-16], -1
-    jmp .init_err
-.sy_positif:
-    mov word[bp-16], 1
-    
-.init_err:
-    ; err = dx - dy
-    mov ax, word[bp-10]
-    sub ax, word[bp-12]
-    mov word[bp-18], ax
-    
-.boucle:
-    ; Dessiner le pixel courant
-    mov ax, word[bp-2]
-    mov bx, word[bp-4]
-    mov cl, byte[bp-19]
-    call put_pixel
-    
-    ; Vérifier si on a atteint (x2, y2)
-    mov ax, word[bp-2]
-    cmp ax, word[bp-6]
-    jne .continuer
-    mov ax, word[bp-4]
-    cmp ax, word[bp-8]
-    je .fin
-    
-.continuer:
-    ; e2 = 2 * err
-    mov ax, word[bp-18]
-    shl ax, 1           ; e2 = err * 2
-    mov si, ax          ; si = e2
-    
-    ; Si e2 > -dy
-    mov bx, word[bp-12]
-    neg bx              ; bx = -dy
-    cmp si, bx
-    jle .check_dx
-    
-    ; err -= dy
-    mov ax, word[bp-18]
-    sub ax, word[bp-12]
-    mov word[bp-18], ax
-    
-    ; x1 += sx
-    mov ax, word[bp-14]
-    add word[bp-2], ax
-    
-.check_dx:
-    ; Si e2 < dx
-    cmp si, word[bp-10]
-    jge .boucle
-    
-    ; err += dx
-    mov ax, word[bp-18]
-    add ax, word[bp-10]
-    mov word[bp-18], ax
-    
-    ; y1 += sy
-    mov ax, word[bp-16]
-    add word[bp-4], ax
-    
-    jmp .boucle
-    
-.fin:
-    mov sp, bp
-    pop bp
+    leave
     ret
 
 ; ===============================================
 ; Fonction: dessiner_contour_triangle
 ; Dessine le contour du triangle
-; Entrée: CL = couleur
+; Entrée: edi = couleur
 ; ===============================================
 dessiner_contour_triangle:
-    push bp
-    mov bp, sp
-    push di
+    push rbp
+    mov rbp, rsp
+    sub rsp, 16
     
-    movzx di, cl        ; Sauvegarder la couleur dans DI
+    mov dword[rbp-4], edi   ; Sauvegarder la couleur
+    
+    ; Définir la couleur
+    mov rdi, qword[display_name]
+    mov rsi, qword[gc]
+    mov edx, dword[rbp-4]
+    call XSetForeground
     
     ; Ligne AB
-    mov ax, word[ax_coord]
-    mov bx, word[ay_coord]
-    mov cx, word[bx_coord]
-    mov dx, word[by_coord]
-    call dessiner_ligne
+    mov rdi, qword[display_name]
+    mov rsi, qword[window]
+    mov rdx, qword[gc]
+    mov ecx, dword[ax_coord]
+    mov r8d, dword[ay_coord]
+    mov r9d, dword[bx_coord]
+    push qword[by_coord]
+    call XDrawLine
+    add rsp, 8
     
     ; Ligne BC
-    mov ax, word[bx_coord]
-    mov bx, word[by_coord]
-    mov cx, word[cx_coord]
-    mov dx, word[cy_coord]
-    call dessiner_ligne
+    mov rdi, qword[display_name]
+    mov rsi, qword[window]
+    mov rdx, qword[gc]
+    mov ecx, dword[bx_coord]
+    mov r8d, dword[by_coord]
+    mov r9d, dword[cx_coord]
+    push qword[cy_coord]
+    call XDrawLine
+    add rsp, 8
     
     ; Ligne CA
-    mov ax, word[cx_coord]
-    mov bx, word[cy_coord]
-    mov cx, word[ax_coord]
-    mov dx, word[ay_coord]
-    call dessiner_ligne
+    mov rdi, qword[display_name]
+    mov rsi, qword[window]
+    mov rdx, qword[gc]
+    mov ecx, dword[cx_coord]
+    mov r8d, dword[cy_coord]
+    mov r9d, dword[ax_coord]
+    push qword[ay_coord]
+    call XDrawLine
+    add rsp, 8
     
-    pop di
-    pop bp
+    leave
     ret
 
 ; ===============================================
 ; Fonction: generer_couleur_aleatoire
-; Génère une couleur aléatoire (palette VGA)
-; Sortie: AL = couleur (1-255, évite 0 qui est noir)
+; Génère une couleur RGB aléatoire
+; Sortie: eax = couleur (0x00RRGGBB)
 ; ===============================================
 generer_couleur_aleatoire:
-    push bx
+    push rbx
     
-    mov ax, 254         ; Max 254
+    ; Rouge
+    mov rdi, 256
     call generer_nombre_aleatoire
-    inc ax              ; Résultat entre 1 et 255
+    shl rax, 16
+    mov rbx, rax
     
-    pop bx
+    ; Vert
+    mov rdi, 256
+    call generer_nombre_aleatoire
+    shl rax, 8
+    or rbx, rax
+    
+    ; Bleu
+    mov rdi, 256
+    call generer_nombre_aleatoire
+    or rbx, rax
+    
+    mov rax, rbx
+    pop rbx
     ret
 
 ; ===============================================
@@ -721,63 +637,63 @@ generer_couleur_aleatoire:
 ; Génère N triangles aléatoires
 ; ===============================================
 generer_n_triangles:
-    push bp
-    mov bp, sp
-    push bx
-    push si
-    push di
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
     
-    xor si, si          ; compteur = 0
-    mov di, triangles   ; Pointeur vers le tableau
+    xor r12, r12            ; compteur = 0
+    lea r13, [triangles]    ; Pointeur vers le tableau
     
 .loop:
-    cmp si, word[nb_triangles_a_dessiner]
+    cmp r12, qword[nb_triangles_a_dessiner]
     jge .fin
     
     ; Générer 6 coordonnées
-    mov ax, MAX_X
+    mov rdi, MAX_X
     call generer_nombre_aleatoire
-    mov word[di], ax    ; ax
-    add di, 2
+    mov qword[r13], rax     ; ax
+    add r13, 8
     
-    mov ax, MAX_Y
+    mov rdi, MAX_Y
     call generer_nombre_aleatoire
-    mov word[di], ax    ; ay
-    add di, 2
+    mov qword[r13], rax     ; ay
+    add r13, 8
     
-    mov ax, MAX_X
+    mov rdi, MAX_X
     call generer_nombre_aleatoire
-    mov word[di], ax    ; bx
-    add di, 2
+    mov qword[r13], rax     ; bx
+    add r13, 8
     
-    mov ax, MAX_Y
+    mov rdi, MAX_Y
     call generer_nombre_aleatoire
-    mov word[di], ax    ; by
-    add di, 2
+    mov qword[r13], rax     ; by
+    add r13, 8
     
-    mov ax, MAX_X
+    mov rdi, MAX_X
     call generer_nombre_aleatoire
-    mov word[di], ax    ; cx
-    add di, 2
+    mov qword[r13], rax     ; cx
+    add r13, 8
     
-    mov ax, MAX_Y
+    mov rdi, MAX_Y
     call generer_nombre_aleatoire
-    mov word[di], ax    ; cy
-    add di, 2
+    mov qword[r13], rax     ; cy
+    add r13, 8
     
     ; Générer une couleur
     call generer_couleur_aleatoire
-    mov bx, si
-    mov byte[couleurs + bx], al
+    lea rbx, [couleurs]
+    mov dword[rbx + r12*4], eax
     
-    inc si
+    inc r12
     jmp .loop
     
 .fin:
-    pop di
-    pop si
-    pop bx
-    pop bp
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 ; ===============================================
@@ -785,60 +701,76 @@ generer_n_triangles:
 ; Dessine tous les triangles générés
 ; ===============================================
 dessiner_n_triangles:
-    push bp
-    mov bp, sp
-    push bx
-    push si
-    push di
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
     
-    xor si, si          ; compteur = 0
-    mov di, triangles   ; Pointeur vers le tableau
+    xor r12, r12            ; compteur = 0
+    lea r13, [triangles]    ; Pointeur vers le tableau
     
 .loop:
-    cmp si, word[nb_triangles_a_dessiner]
+    cmp r12, qword[nb_triangles_a_dessiner]
     jge .fin
     
     ; Charger le triangle courant dans les variables globales
-    mov ax, word[di]
-    mov word[ax_coord], ax
-    mov ax, word[di+2]
-    mov word[ay_coord], ax
-    mov ax, word[di+4]
-    mov word[bx_coord], ax
-    mov ax, word[di+6]
-    mov word[by_coord], ax
-    mov ax, word[di+8]
-    mov word[cx_coord], ax
-    mov ax, word[di+10]
-    mov word[cy_coord], ax
+    mov rax, qword[r13]
+    mov qword[ax_coord], rax
+    mov rax, qword[r13+8]
+    mov qword[ay_coord], rax
+    mov rax, qword[r13+16]
+    mov qword[bx_coord], rax
+    mov rax, qword[r13+24]
+    mov qword[by_coord], rax
+    mov rax, qword[r13+32]
+    mov qword[cx_coord], rax
+    mov rax, qword[r13+40]
+    mov qword[cy_coord], rax
     
     ; Charger la couleur
-    mov bx, si
-    mov cl, byte[couleurs + bx]
+    lea rbx, [couleurs]
+    mov edi, dword[rbx + r12*4]
+    
+    ; Définir la couleur pour le remplissage
+    push rdi
+    mov rdi, qword[display_name]
+    mov rsi, qword[gc]
+    mov edx, dword[rbx + r12*4]
+    call XSetForeground
+    pop rdi
     
     ; Remplir le triangle
-    push si
-    push di
+    push r12
+    push r13
     call remplir_triangle
-    pop di
-    pop si
+    pop r13
+    pop r12
     
-    ; Dessiner le contour en noir (couleur 0)
-    push si
-    push di
-    mov cl, 0
+    ; Dessiner le contour en noir (couleur 0x000000)
+    push r12
+    push r13
+    mov edi, 0x000000
     call dessiner_contour_triangle
-    pop di
-    pop si
+    pop r13
+    pop r12
+    
+    ; Flush après chaque triangle pour voir le dessin progresser
+    push r12
+    push r13
+    mov rdi, qword[display_name]
+    call XFlush
+    pop r13
+    pop r12
     
     ; Passer au triangle suivant
-    add di, 12          ; 6 mots de 2 octets
-    inc si
+    add r13, 48             ; 6 qwords de 8 octets
+    inc r12
     jmp .loop
     
 .fin:
-    pop di
-    pop si
-    pop bx
-    pop bp
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
