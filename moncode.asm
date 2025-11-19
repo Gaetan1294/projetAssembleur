@@ -32,7 +32,7 @@ section .data
     screen: dd 0
 
 section .text
-    global _start
+    global main
     
     ; Déclarer les fonctions X11 externes
     extern XOpenDisplay
