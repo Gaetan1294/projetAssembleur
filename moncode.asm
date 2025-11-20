@@ -32,6 +32,20 @@ extern exit
 %define WORD	2
 %define BYTE	1
 
+global gen_co
+gen_co:
+    rdrand ax		; AX contient 0-65535
+    jnc gen_co 		; Vérifier CF, recommencer si échec
+    
+    ; Limiter à 0-399
+    xor rdx, rdx        ; pour ne pas fausser la division : RDX = 0 et,
+    movzx rax, ax       ; étendre AX (16 bits) à RAX (64 bits) pour suppr les résidus
+    mov rbx, 400        ; Diviseur = dimensions de la fenetre
+    div rbx             ; RAX / 400, le reste est dans RDX
+    
+    mov ax, dx          ; AX = DX (reste sur 16bits)
+    ret
+
 global main
 
 section .bss
@@ -190,10 +204,15 @@ mov rsi,qword[gc]
 mov edx,0x000000	; Couleur du crayon ; noir
 call XSetForeground
 ; coordonnées de la ligne 1 (noire)
-mov dword[x1],50
-mov dword[y1],50
-mov dword[x2],200
-mov dword[y2],350
+
+call gen_co
+mov dword[x1],eax
+call gen_co
+mov dword[y1],eax
+call gen_co
+mov dword[x2],eax
+call gen_co
+mov dword[y2],eax
 ; dessin de la ligne 1
 mov rdi,qword[display_name]
 mov rsi,qword[window]
@@ -209,12 +228,16 @@ mov rdi,qword[display_name]
 mov rsi,qword[gc]
 mov edx,0xFFAA00	; Couleur du crayon ; orange
 call XSetForeground
-; coordonnées de la ligne 1 (noire)
-mov dword[x1],300
-mov dword[y1],50
-mov dword[x2],50
-mov dword[y2],350
-; dessin de la ligne 1
+; coordonnées de la ligne 2 (orange)
+call gen_co
+mov dword[x1],eax
+call gen_co
+mov dword[y1],eax
+call gen_co
+mov dword[x2],eax
+call gen_co
+mov dword[y2],eax
+; dessin de la ligne 2
 mov rdi,qword[display_name]
 mov rsi,qword[window]
 mov rdx,qword[gc]
